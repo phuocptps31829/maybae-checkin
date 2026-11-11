@@ -39,6 +39,7 @@
 #cameraPanel { margin: .75rem 0 0; }
 #video { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #111412; border-radius: .7rem; }
 #stopCamera { margin-top: .65rem; }
+.in-app-banner { background: #4a2d0b; border: 1px solid #d97706; color: #fef3c7; padding: .75rem; border-radius: .7rem; margin-bottom: 1rem; font-size: .88rem; line-height: 1.45; }
 </style>
   </head>
 <body>
@@ -47,6 +48,9 @@
       <span class="brand">MAYBAE</span>
       <span id="connection" role="status">Đang kết nối Google Sheet…</span>
     </header>
+    <div id="inAppNotice" hidden class="in-app-banner">
+      ⚠️ <strong>Trình duyệt Zalo/Facebook chặn Camera.</strong> Vui lòng bấm dấu <strong>•••</strong> ở góc màn hình và chọn <strong>"Mở bằng Safari"</strong> (hoặc Chrome) để quét QR!
+    </div>
     <h1>Check-in vé</h1>
     <p id="event">Điều hành cổng vào</p>
     <section class="stats" id="stats" hidden aria-label="Thống kê vé">
@@ -60,7 +64,7 @@
       </div>
       <button class="primary" id="camera" type="button" disabled>Mở camera quét QR</button>
       <div id="cameraPanel" hidden>
-        <video id="video" autoplay playsinline muted aria-label="Khung camera quét QR"></video>
+        <video id="video" autoplay playsinline webkit-playsinline muted aria-label="Khung camera quét QR"></video>
         <button id="stopCamera" type="button">Tắt camera</button>
       </div>
       <div class="toolbar">
@@ -10281,6 +10285,25 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
       }
     }
 
+    function feedback() {
+      try {
+        if ('vibrate' in navigator) navigator.vibrate(100);
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.08);
+        gain.gain.setValueAtTime(0.2, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.1);
+      } catch (_) {}
+    }
+
     function stopCamera() {
       cameraAttempt++;
       cancelAnimationFrame(frameId);
@@ -10296,9 +10319,9 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
       if (!stream) return;
       frameId = requestAnimationFrame(scanFrame);
       const video = $('video');
-      if (busy || decoding || video.readyState < 2 || !video.videoWidth || now - previousFrame < 150) return;
+      if (busy || decoding || video.readyState < 2 || !video.videoWidth || now - previousFrame < 80) return;
       previousFrame = now;
-      const scale = Math.min(1, 850 / Math.max(video.videoWidth, video.videoHeight));
+      const scale = Math.min(1, 480 / Math.max(video.videoWidth, video.videoHeight));
       const width = Math.max(1, Math.round(video.videoWidth * scale));
       const height = Math.max(1, Math.round(video.videoHeight * scale));
       if (canvas.width !== width || canvas.height !== height) {
@@ -10307,9 +10330,10 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
       }
       context.drawImage(video, 0, 0, width, height);
       const frame = context.getImageData(0, 0, width, height);
-      const code = jsQR(frame.data, width, height, {inversionAttempts: 'dontInvert'})?.data.trim();
+      const code = jsQR(frame.data, width, height, {inversionAttempts: 'dontInvert'})?.data?.trim();
       if (!code || code === lastCameraCode) return;
       lastCameraCode = code;
+      feedback();
       void verify(code).then(result => {
         if (result.code === 'UNKNOWN') stopCamera();
       });
@@ -10320,19 +10344,53 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
       const attempt = ++cameraAttempt;
       $('camera').disabled = true;
       try {
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Mở link HTTPS bằng Safari hoặc Chrome để dùng camera.');
-        const captured = await navigator.mediaDevices.getUserMedia({
-          audio: false, video: {facingMode: {ideal: 'environment'}}
-        });
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error('Mở link bằng trình duyệt Safari hoặc Chrome để cấp quyền camera.');
+        }
+
+        const video = $('video');
+        video.muted = true;
+        video.playsInline = true;
+        video.setAttribute('playsinline', 'true');
+        video.setAttribute('webkit-playsinline', 'true');
+        video.setAttribute('muted', 'true');
+
+        let captured = null;
+        const constraintTiers = [
+          { audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+          { audio: false, video: { facingMode: 'environment' } },
+          { audio: false, video: true }
+        ];
+
+        for (const c of constraintTiers) {
+          try {
+            captured = await navigator.mediaDevices.getUserMedia(c);
+            if (captured) break;
+          } catch (_) {}
+        }
+
+        if (!captured) {
+          throw new Error('Không mở được camera. Hãy kiểm tra quyền Camera trong Cài đặt Safari.');
+        }
+
         if (attempt !== cameraAttempt) {
           captured.getTracks().forEach(track => track.stop());
           return;
         }
         stream = captured;
-        $('video').srcObject = stream;
         $('cameraPanel').hidden = false;
         $('camera').hidden = true;
-        await $('video').play();
+        video.srcObject = stream;
+
+        try {
+          await video.play();
+        } catch (_) {
+          await new Promise(resolve => {
+            video.onloadedmetadata = () => video.play().then(resolve).catch(resolve);
+            setTimeout(resolve, 800);
+          });
+        }
+
         if (attempt !== cameraAttempt) return;
         $('notice').textContent = 'Đưa từng mã QR vào khung để kiểm vé.';
         frameId = requestAnimationFrame(scanFrame);
@@ -10343,8 +10401,8 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         if (attempt !== cameraAttempt) return;
         stopCamera();
         $('notice').textContent = error.name === 'NotAllowedError'
-          ? 'Cho phép camera trong cài đặt của trang rồi thử lại.'
-          : 'Không mở được camera. Kiểm tra camera hoặc chọn ảnh QR.';
+          ? 'Bạn đã từ chối camera. Vào Cài đặt iPhone > Safari > Camera để cho phép.'
+          : (error.message || 'Không mở được camera. Hãy mở bằng Safari.');
       } finally {
         updateControls();
       }
@@ -10377,15 +10435,22 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
           image.onerror = () => reject(new Error('Không mở được ảnh. Hãy thử ảnh JPG hoặc PNG.'));
           image.src = url;
         });
-        const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight));
+        const tryScales = [1200, 800, 1600];
         const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
-        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
-        const context = canvas.getContext('2d');
-        context.drawImage(image, 0, 0, canvas.width, canvas.height);
-        const frame = context.getImageData(0, 0, canvas.width, canvas.height);
-        token = jsQR(frame.data, frame.width, frame.height)?.data;
+        const context = canvas.getContext('2d', {willReadFrequently: true});
+        for (const maxDim of tryScales) {
+          const scale = Math.min(1, maxDim / Math.max(image.naturalWidth, image.naturalHeight));
+          const width = Math.max(1, Math.round(image.naturalWidth * scale));
+          const height = Math.max(1, Math.round(image.naturalHeight * scale));
+          canvas.width = width;
+          canvas.height = height;
+          context.drawImage(image, 0, 0, width, height);
+          const frame = context.getImageData(0, 0, width, height);
+          token = jsQR(frame.data, width, height, {inversionAttempts: 'attemptBoth'})?.data?.trim();
+          if (token) break;
+        }
         if (!token) throw new Error('Chưa đọc được mã QR. Hãy chụp gần hơn và giữ đủ bốn góc.');
+        feedback();
       } catch (error) {
         render({ code: 'INVALID', message: error.message || 'Không đọc được ảnh QR.' });
       } finally {
@@ -10408,6 +10473,12 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
       if (result.code === 'CHECKED_IN' || result.code === 'ALREADY_CHECKED_IN') $('code').value = '';
     };
     $('reconnect').onclick = refresh;
+    try {
+      const ua = navigator.userAgent || '';
+      if (/FBAN|FBAV|Instagram|Line|MicroMessenger|Zalo|musical_ly/i.test(ua)) {
+        $('inAppNotice').hidden = false;
+      }
+    } catch (_) {}
     refresh();
 </script>
 </body>
