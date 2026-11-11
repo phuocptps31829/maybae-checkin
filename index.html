@@ -39,6 +39,7 @@
 #cameraPanel { margin: .75rem 0 0; }
 #video { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #111412; border-radius: .7rem; }
 #stopCamera { margin-top: .65rem; }
+#scanNext { font-size: 1.02rem; font-weight: 700; width: 100%; min-height: 48px; border-radius: .7rem; }
 .in-app-banner { background: #4a2d0b; border: 1px solid #d97706; color: #fef3c7; padding: .75rem; border-radius: .7rem; margin-bottom: 1rem; font-size: .88rem; line-height: 1.45; }
 </style>
   </head>
@@ -79,6 +80,7 @@
       <h2 id="resultTitle"></h2>
       <p id="resultName"></p>
       <p id="resultDetail"></p>
+      <button class="primary" id="scanNext" type="button" style="margin-top: .85rem;">⚡ Quét vé tiếp theo</button>
     </section>
     <form class="panel" id="manual">
       <label for="code">Nhập mã khách mời trên vé</label>
@@ -10192,9 +10194,9 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 /******/ ])["default"];
 });</script>
 <script>const $ = id => document.getElementById(id);
-    const controls = ['camera', 'takePhoto', 'choosePhoto', 'submit'];
+    const controls = ['camera', 'takePhoto', 'choosePhoto', 'submit', 'scanNext'];
     let state, busy = false, decoding = false, retry;
-    let stream, frameId, cameraAttempt = 0, previousFrame = 0, lastCameraCode = "";
+    let stream, frameId, cameraAttempt = 0, previousFrame = 0, lastCameraCode = "", autoNextTimer = null;
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d", {willReadFrequently: true});
 
@@ -10259,6 +10261,18 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
       return false;
     }
 
+    function readyNextScan(feedbackTriggered = false) {
+      if (autoNextTimer) {
+        clearTimeout(autoNextTimer);
+        autoNextTimer = null;
+      }
+      lastCameraCode = '';
+      if (feedbackTriggered) feedback();
+      if (stream) {
+        $('notice').textContent = 'Camera đã sẵn sàng quét vé tiếp theo.';
+      }
+    }
+
     async function verify(code, id) {
       if (!state || !hasPin()) return { code: 'UNKNOWN', message: 'Trang điều hành cần kết nối và nhập PIN nếu được yêu cầu.' };
       if (busy || decoding) return { code: 'UNKNOWN', message: 'Trang điều hành đang xử lý vé khác. Hãy thử lại.' };
@@ -10273,11 +10287,19 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         if (result.code === 'CHECKED_IN') {
           $('checkedIn').textContent = Number($('checkedIn').textContent) + 1;
         }
+        if (autoNextTimer) clearTimeout(autoNextTimer);
+        autoNextTimer = setTimeout(() => {
+          readyNextScan(false);
+        }, 2200);
         return result;
       } catch (error) {
         retry = { code, id: scanId };
         const result = { code: 'UNKNOWN', message: 'Chưa nhận được xác nhận vé.', detail: error.message };
         render(result);
+        if (autoNextTimer) clearTimeout(autoNextTimer);
+        autoNextTimer = setTimeout(() => {
+          readyNextScan(false);
+        }, 2500);
         return result;
       } finally {
         busy = false;
@@ -10471,6 +10493,12 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
       if (!code) return;
       const result = await verify(code);
       if (result.code === 'CHECKED_IN' || result.code === 'ALREADY_CHECKED_IN') $('code').value = '';
+    };
+    $('scanNext').onclick = () => {
+      readyNextScan(true);
+      if (!stream && state && hasPin()) {
+        $('camera').click();
+      }
     };
     $('reconnect').onclick = refresh;
     try {
